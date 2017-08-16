@@ -90,14 +90,15 @@ var (
 
     // other cli related options
     recLogFile string = ""
-    verbose bool      = false
     showUsage bool    = false
+    findOnly bool     = true
+    removeFiles bool  = false
+
+    // TODO: Options specific to sync data
     syncDelete bool   = false
-    findOnly bool     = false
     syncOnly bool     = false
     useXdr bool       = false
     useCksm bool      = false
-    removeFiles bool  = false
 
     // (After-before) timerange options
     modBefore int64        = time.Now().In(time.UTC).UnixNano()
@@ -118,7 +119,7 @@ var (
 
     queryPolicy *as.QueryPolicy = nil
 
-    findSyncThread = 1
+    findSyncThread = 10
     // Global stats to track synced, unsynced records
     gStat TStats
     // Track stats for all sets within namespace
@@ -129,10 +130,12 @@ var (
     recSyncedTotalOld int = 0
 
     // Extra data stats, variable
-    samplePer int = 10
+    samplePer int = 0
+    sampleSz int = 1000
     tps int = 0
 
     logger *log.Logger
+    logLevel int = 1
 
 )
 
@@ -140,7 +143,6 @@ func initLogger() {
 	var buf bytes.Buffer
 	logger = log.New(&buf, "", log.LstdFlags|log.Lshortfile)
     logger.SetOutput(os.Stdout)
-    logger.Print("Init logger.")
 
     // Init log file to direct logs to the file
     os.MkdirAll("log", os.ModePerm)
@@ -153,7 +155,7 @@ func initLogger() {
 
     // Set customzed logger
     Logger.SetLogger(logger)
-	Logger.SetLevel(DEBUG)
+	Logger.SetLevel(INFO)
 
 }
 
@@ -170,22 +172,26 @@ func main() {
     flag.StringVar(&srcPass, "dp", srcPass, "Destination host Password.\n")
     flag.StringVar(&namespace, "n", namespace, "Aerospike namespace.\n")
     flag.StringVar(&set, "s", set, "Aerospike set name. Default: All sets in ns.\n")
-    flag.StringVar(&binString, "B", binString, "Bin list: bin1,bin2,bin3...\n")
-    flag.StringVar(&modBeforeString, "b", modBeforeString, "Time before which records modified. eg: Jan 2, 2006 at 3:04pm (MST)\n")
-    flag.StringVar(&modAfterString, "a", modAfterString, "Time after which records modified. eg: Jan 2, 2006 at 3:04pm (MST)\n")
+    flag.StringVar(&binString, "b", binString, "Bin list: bin1,bin2,bin3...\n")
+    flag.StringVar(&modBeforeString, "B", modBeforeString, "Time before which records modified. eg: Jan 2, 2006 at 3:04pm (MST)\n")
+    flag.StringVar(&modAfterString, "A", modAfterString, "Time after which records modified. eg: Jan 2, 2006 at 3:04pm (MST)\n")
     flag.StringVar(&recLogFile, "o", recLogFile, "Output File to log records to be synced.\n")
-    //flag.IntVar(&tps, "t", tps, "Throttling limit. will throttle server writes if tps exceed given limit.\n")
-    flag.IntVar(&priorityInt, "f", priorityInt, "The scan priority. 0 (auto), 1(low), 2 (medium), 3 (high). Default: 0.\n")
-    flag.IntVar(&samplePer, "p", samplePer, "Sample percentage. Default: 10.\n")
+    flag.IntVar(&priorityInt, "P", priorityInt, "The scan priority. 0 (auto), 1(low), 2 (medium), 3 (high). Default: 0.\n")
+    flag.IntVar(&samplePer, "p", samplePer, "Sample percentage. Default: 0.\n")
+    flag.IntVar(&sampleSz, "sz", sampleSz, "Sample size. if sample percentage given, it won't work. Default: 1000.\n")
     flag.IntVar(&findSyncThread, "st", findSyncThread, "Find sync thread. Default: 10.\n")
     flag.BoolVar(&removeFiles, "r", removeFiles, "Remove existing sync log file.")
-    flag.BoolVar(&syncDelete, "sd", syncDelete, "Delete synced data also. Warning (Don't use this in active-active topology.)\n")
-    flag.BoolVar(&findOnly, "fo", findOnly, "Tool will just find unsynced data. By default: (find and sync)\n")
-    flag.BoolVar(&syncOnly, "so", syncOnly, "Tool will just sync records using record log file.\n")
+    flag.IntVar(&logLevel, "ll", logLevel, "Set log level, DEBUG(0), INFO(1), WARNING(2), ERR(3), Default: INFO\n")
+    flag.BoolVar(&showUsage, "u", showUsage, "Show usage information.\n")
+
+    // TODO: Option specific to sync data
+    //flag.IntVar(&tps, "t", tps, "Throttling limit. will throttle server writes if tps exceed given limit.\n")
+    //flag.BoolVar(&syncDelete, "sd", syncDelete, "Delete synced data also. Warning (Don't use this in active-active topology.)\n")
+    //flag.BoolVar(&findOnly, "fo", findOnly, "Tool will just find unsynced data. By default: (find and sync)\n")
+    //flag.BoolVar(&syncOnly, "so", syncOnly, "Tool will just sync records using record log file.\n")
     //flag.BoolVar(&useXdr, "xdr", useXdr, "Use XDR to ship unsynced records.\n")
     //flag.BoolVar(&useCksm, "c", useCksm, "Compare record checksum.\n")
-    flag.BoolVar(&verbose, "v", verbose, "Verbose mode\n")
-    flag.BoolVar(&showUsage, "u", showUsage, "Show usage information.\n")
+    //flag.BoolVar(&verbose, "v", verbose, "Verbose mode\n")
 
 	readFlags()
 
@@ -258,6 +264,7 @@ func readFlags() {
     }
 
     panicOnError(err)
+
     // Scan priorities
     if priorityInt != 0 {
         if priorityInt == 1 {
@@ -266,6 +273,17 @@ func readFlags() {
             priority = as.MEDIUM
         } else if priorityInt == 3 {
             priority = as.HIGH
+        }
+    }
+
+    // Set log level
+    if logLevel != 1 {
+        if logLevel == 0 {
+            Logger.SetLevel(DEBUG)
+        } else if logLevel == 2 {
+            Logger.SetLevel(WARNING)
+        } else if logLevel == 3 {
+            Logger.SetLevel(ERR)
         }
     }
 }
@@ -366,7 +384,7 @@ func findRecordsNotInSync() {
 
     var dstRecordset *as.Recordset = nil
 
-    // Channel to store unsync record's info, max 100 record at a time
+    // Channel to store unsync record's info, max 100000 record at a time
     recordInfoChan := make(chan string, 100000)
 
     // Open record log file to write found unsync records
@@ -378,6 +396,15 @@ func findRecordsNotInSync() {
         }
         defer file.Close()
     }
+
+    // Add progress indicator
+    go func() {
+        fmt.Printf("Progress")
+        for {
+            fmt.Printf(".")
+            time.Sleep(100*time.Millisecond)
+        }
+    }()
 
     // Get replication factor
     replFact := getReplicationFact(srcClient, namespace)
@@ -406,7 +433,17 @@ func findRecordsNotInSync() {
         // Update set stats
         setStats[setname] = &TStats{}
         setStats[setname].nObj = nObj
-        setStats[setname].nSampleObj = nObj * samplePer / 100
+
+        sz := 0
+        if samplePer != 0 {
+            sz = nObj * samplePer / 100
+            Logger.Info("Sample percentage given, Sample Size: " + strconv.Itoa(sz))
+        } else {
+            sz = sampleSz
+            Logger.Info("Sample percentage not given, Sample Size: " + strconv.Itoa(sz))
+        }
+
+        setStats[setname].nSampleObj = sz
 
         srcRecordset := getRecordset(srcClient, namespace, setname, binList, modAfter, modBefore)
 
@@ -479,29 +516,40 @@ L1:
 
                 recordInfoChan <- getRecordLogInfoLine(insertedOp, srcRec.Key, gen)
                 sStat.recNotInSyncInserted++
+                /*
                 gStat.recNotInSyncInserted++
                 Logger.Debug("Record op Insert. gStat_RecNotInSync: %s, setStat_RecNotInSync: %s. SET: %s",
                     strconv.Itoa(gStat.recNotInSyncInserted),
+                    strconv.Itoa(sStat.recNotInSyncInserted), setname)
+                */
+                Logger.Debug("Record op Insert. setStat_RecNotInSync: %s. SET: %s",
                     strconv.Itoa(sStat.recNotInSyncInserted), setname)
                 continue
             }
 
             // src and dst record doesn't match. Record Updated. log it.
             if !reflect.DeepEqual(srcRec.Bins, dstRec.Bins) {
-                fmt.Println("src")
-                fmt.Println("dst")
-                fmt.Println()
+                //fmt.Println("src")
+                //fmt.Println("dst")
+                //fmt.Println()
 
                 recordInfoChan <- getRecordLogInfoLine(updatedOp, srcRec.Key, dstRec.Generation)
                 sStat.recNotInSyncUpdated++
+                Logger.Debug("Record op Update. setStat_RecNotInSync: %s. SET: %s",
+                    strconv.Itoa(sStat.recNotInSyncUpdated), setname)
+                continue
+                /*
                 gStat.recNotInSyncUpdated++
                 Logger.Debug("Record op Update. gStat_RecNotInSync: %s, setStat_RecNotInSync: %s. SET: %s",
                     strconv.Itoa(gStat.recNotInSyncUpdated),
                     strconv.Itoa(sStat.recNotInSyncUpdated), setname)
+                */
             }
 
 		case err := <-srcRecordset.Errors:
-            Logger.Debug("Record read error: %s. SET: %s", err.Error(), setname)
+            if err != nil {
+                Logger.Debug("Record read error: %s. SET: %s", err.Error(), setname)
+            }
             sStat.reqErr++
 			//fmt.Println(err)
             continue
@@ -523,7 +571,7 @@ L2:
                 Logger.Info("Dst: No record left to match. SET: %s", setname)
 				break L2
 			}
-            sStat.scanReq++
+            // sStat.scanReq++
 
             srcRec, _ := srcClient.Get(readPolicy, dstRec.Key, binList...)
             //panicOnError(err)
@@ -531,15 +579,21 @@ L2:
             if  srcRec == nil || len(srcRec.Bins) == 0 {
                 recordInfoChan <- getRecordLogInfoLine(deletedOp, dstRec.Key, dstRec.Generation)
                 sStat.recNotInSyncDeleted++
+                Logger.Debug("Record op Delete. setStat_RecNotInSync: %s. SET: %s",
+                    strconv.Itoa(sStat.recNotInSyncDeleted), setname)
+                /*
                 gStat.recNotInSyncDeleted++
                 Logger.Debug("Record op Delete. gStat_RecNotInSync: %s, setStat_RecNotInSync: %s. SET: %s",
                     strconv.Itoa(gStat.recNotInSyncDeleted),
                     strconv.Itoa(sStat.recNotInSyncDeleted), setname)
+                */
                 continue
             }
 
 		case err := <-srcRecordset.Errors:
-            Logger.Debug("Record read error: %s. SET: %s", err.Error(), setname)
+            if err != nil {
+                Logger.Debug("Record read error: %s. SET: %s", err.Error(), setname)
+            }
             sStat.reqErr++
 			//fmt.Println(err)
             continue
@@ -973,13 +1027,13 @@ func printLine(setStatsMeta []string, unsyncStr string, syncStr string) {
 // Create set_stats to string to print
 func printStat(ns string, set string, stat *TStats) {
 
-    // Header ["Namespace", "Set", "Total_Records", "Sampled_Records",
-    // "Unsync(Total, Updated, Inserted, Deleted)", "Sync(Total, Updated,
-    // Inserted, Deleted, GenErr)"]
+    // Header [Namespace, Set, Total_Records, Sampled_Records,
+    // Unsync(Total, Updated, Inserted, Deleted),
+    // Sync(Total, Updated, Inserted, Deleted, GenErr)]
 
     // Print ("Namespace", "Set", "Total_Records", "Sampled_Records")
     var setStatsMeta []string
-    setStatsMeta = append(setStatsMeta, ns, set, strconv.Itoa(stat.nObj), strconv.Itoa(stat.nSampleObj))
+    setStatsMeta = append(setStatsMeta, ns, set, strconv.Itoa(stat.nObj), strconv.Itoa(stat.scanReq))
 
     unsyncStr := ""
     syncStr := ""
@@ -1004,35 +1058,54 @@ func printStat(ns string, set string, stat *TStats) {
     }
     printLine(setStatsMeta, unsyncStr, syncStr)
 
-    fmt.Println(stat.reqErr)
+}
+
+
+func calcGlobalStat(gStat *TStats, setStats map[string]*TStats) {
+    for _, statsObj := range setStats {
+        gStat.nObj += statsObj.nObj
+        gStat.scanReq += statsObj.scanReq
+
+        if !syncOnly {
+            gStat.recNotInSyncUpdated += statsObj.recNotInSyncUpdated
+            gStat.recNotInSyncInserted += statsObj.recNotInSyncInserted
+            gStat.recNotInSyncDeleted += statsObj.recNotInSyncDeleted
+        }
+        /*
+        if !findOnly {
+            gStat.recSyncedUpdated += statsObj.recSyncedUpdated
+            gStat.recSyncedInserted += statsObj.recSyncedInserted
+            gStat.recSyncedDeleted += statsObj.recSyncedDeleted
+            gStat.genErr += statsObj.genErr
+        }*/
+    }
 }
 
 
 // Print All set stats, global stats
 func printAllStats() {
-    nObj := 0
-    nSampleObj := 0
 
-    fmt.Println("\n****** Data Sync Output***")
+    fmt.Printf("\n\n****** Data Sync Output***\n\n")
+
     // Print metainfo
     fmt.Println("Modified after: " + modAfterString)
     fmt.Println("Modified before: " + modBeforeString)
 
     fmt.Println("\n****** set stats *********")
+
     // Print header
     metaList  := []string{"Namespace", "Set", "Total_Records", "Sampled_Records"}
     unsyncStr := "Unsync(Total, Updated, Inserted, Deleted)"
     syncStr   := "Sync(Total, Updated, Inserted, Deleted, GenErr)"
     printLine(metaList, unsyncStr, syncStr)
 
+    calcGlobalStat(&gStat, setStats)
+
     for setname, statsObj := range setStats {
-        nObj += statsObj.nObj
-        nSampleObj += statsObj.nSampleObj
         printStat(namespace, setname, statsObj)
     }
+
     fmt.Println("\n****** Global stats ******\n")
-    gStat.nObj = nObj
-    gStat.nSampleObj = nSampleObj
     printStat(namespace, "", &gStat)
     fmt.Println()
 }
