@@ -150,7 +150,6 @@ func validateAndFindInsertedUpdated(srcRecordset *as.Recordset, setname string, 
     Logger.Info("Thread to fetch and match src and dst records. SET: %s", setname)
     Logger.Info("Find Updated, Inserted record if not in sync.")
     sStat := SetStats[setname]
-    readPolicy := as.NewPolicy()
 L1:
 	for {
 
@@ -168,8 +167,12 @@ L1:
             sStat.NScanObj++
 
             // TODO: Add LUT check for record. LUT. skip if srcRecord.LUT > Timestamp
-            dstRec,_ := dstClient.Get(readPolicy, srcRec.Key, binList...)
-            //fmt.Println(dstRec)
+            dstRec, err := dstClient.Get(ReadPolicy, srcRec.Key, binList...)
+            if err != nil {
+                sStat.FindSync.Err++
+                Logger.Debug("Find Inserted/Updated Record_Get From Destination cluster. error: " + err.Error())
+            }
+
             // If rec doesn't exist in dst, it's new insert in src. log it. Add gen = 0 for new rec
             if dstRec == nil {
                 var gen uint32 = 0
@@ -199,8 +202,8 @@ L1:
 		case err := <-srcRecordset.Errors:
             if err != nil {
                 Logger.Debug("Record read error: %s. SET: %s", err.Error(), setname)
+                sStat.FindSync.ScanReqErr++
             }
-            sStat.ReqErr++
 			//fmt.Println(err)
             continue
 		}
@@ -217,7 +220,6 @@ func validateAndFindDeleted(dstRecordset *as.Recordset, setname string, binList 
     Logger.Info("Thread to fetch and match src and dst records. SET: %s", setname)
     Logger.Info("Find Updated, Inserted record if not in sync.")
     sStat := SetStats[setname]
-    readPolicy := as.NewPolicy()
 L2:
 	for {
 		select {
@@ -228,7 +230,11 @@ L2:
 				break L2
 			}
 
-            srcRec, _ := srcClient.Get(readPolicy, dstRec.Key, binList...)
+            srcRec, err := srcClient.Get(ReadPolicy, dstRec.Key, binList...)
+            if err != nil {
+                sStat.FindSync.Err++
+                Logger.Error("Find Deleted. Record_Get From Source cluster. error: " + err.Error())
+            }
 
             if  srcRec == nil {
                 recordInfoChan <- GetRecordLogInfoLine(DELETED_OP, dstRec.Key, dstRec.Generation)
@@ -256,8 +262,8 @@ L2:
 		case err := <-dstRecordset.Errors:
             if err != nil {
                 Logger.Debug("Record read error: %s. SET: %s", err.Error(), setname)
+                sStat.FindSync.ScanReqErr++
             }
-            sStat.ReqErr++
             continue
 		}
 	}
@@ -271,7 +277,7 @@ func getRecordset(client *as.Client, ns string, set string,  binList []string, m
 
     createTimeRangeStm(stm, modAfter, modBefore)
 
-    recordset, err := client.Query(queryPolicy, stm)
+    recordset, err := client.Query(QueryPolicy, stm)
 
     PanicOnError(err)
     return recordset

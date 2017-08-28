@@ -10,7 +10,9 @@ import (
 	as "github.com/aerospike/aerospike-client-go"
     . "github.com/sud82/aerospike-data-sync/logger"
     "bytes"
+    "crypto/tls"
     "errors"
+    "encoding/json"
     "flag"
     "fmt"
     "log"
@@ -20,30 +22,54 @@ import (
     "time"
 )
 
+
+type Cluster struct {
+    Host string
+    User string
+    Pass string
+    TLSName string
+}
+
+const (
+    DEFAULT_TIMEOUT     = 0
+    DEFAULT_MAX_RETRIES = 2
+    DEFAULT_SAMPLE_SIZE = 1000
+)
+
 // command line arguments
 var (
     // External command-line option
-    // Server host, user, pass options
-    SrcHost string = ""
-    SrcUser string = ""
-    SrcPass string = ""
-    DstHost string = ""
-    DstUser string = ""
-    DstPass string = ""
-
-    // Scan priority options
-    PriorityInt int      = 0
+    SrcCluster Cluster
+    DstCluster Cluster
 
     // AS db related options
     Namespace string  = ""
     Set string        = ""
     BinString string  = ""
+    // (After-before) timerange options
+    ModBeforeString string = ""
+    ModAfterString string  = ""
+
+    UnsyncRecInfoDir  string = ""
+    // Scan priority options
+    PriorityInt int = 0
+
+    SamplePer int   = 0
+    SampleSz int    = DEFAULT_SAMPLE_SIZE
+
+    Timeout int = 0
+    MaxRetries int  = DEFAULT_MAX_RETRIES
+
+    RemoveFiles bool  = false
 
     // other cli related options
-    UnsyncRecInfoDir  string = ""
-    ShowUsage bool    = false
     FindOnly bool     = false
-    RemoveFiles bool  = false
+    // logger *log.Logger
+    LogLevel int = 1
+    // TLS
+    TLSConfigFile = ""
+
+    ShowUsage bool    = false
 
     // TODO: Options specific to sync data
     SyncDelete bool   = false
@@ -53,29 +79,12 @@ var (
     // Tps option to throttle sync writes
     Tps int = 0
 
-    // (After-before) timerange options
-    ModBeforeString string = ""
-    ModAfterString string  = ""
 
-    SamplePer int = 0
-    SampleSz int  = 1000
-
-    // logger *log.Logger
-    LogLevel int = 1
-
-    /*
-    // Tls
-    tlsEnable bool = false
-    tlsProtocols string = "TLSv1.2"
-    tlsCipherSuite bool = true
-    tlsRevoke bool = true
-    tlsEncryptOnly bool = false
-    */
-
-    // Internal options (some external options are changed in these internal
-    // options and then used)
     // Number of threads run in parallel to compare src records with dst records
     FindSyncThread = 10
+    DoSyncThread = 10
+    // Internal options (some external options are changed in these internal
+    // options and then used)
     Priority as.Priority = as.DEFAULT
     BinList []string  = nil
     ModBefore int64        = time.Now().In(time.UTC).UnixNano()
@@ -90,10 +99,8 @@ var (
 
 // other variables
 var (
-    srcClientPolicy *as.ClientPolicy = nil
-    dstClientPolicy *as.ClientPolicy = nil
-    queryPolicy *as.QueryPolicy      = nil
-
+    QueryPolicy *as.QueryPolicy = as.NewQueryPolicy()
+    ReadPolicy *as.BasePolicy = as.NewPolicy()
     err error = nil
 )
 
@@ -103,39 +110,30 @@ func main() {
 
     Logger.Info("****** Starting Aerospike data synchronizer ******")
 
-    flag.StringVar(&SrcHost, "sh", SrcHost, "Source host, eg:x.x.x.x:3000\n")
-    flag.StringVar(&SrcUser, "su", SrcUser, "Source host User name.\n")
-    flag.StringVar(&SrcPass, "sp", SrcPass, "Source host Password.\n")
-    flag.StringVar(&DstHost, "dh", DstHost, "Destination host,eg:x.x.x.x:3000\n")
-    flag.StringVar(&SrcUser, "du", SrcUser, "Destination host User name.\n")
-    flag.StringVar(&SrcPass, "dp", SrcPass, "Destination host Password.\n")
+    flag.StringVar(&SrcCluster.Host, "sh", SrcCluster.Host, "Source host, eg:x.x.x.x:3000, x.x.x.x:tls-name:3000\n")
+    flag.StringVar(&SrcCluster.User, "su", SrcCluster.User, "Source host User name.\n")
+    flag.StringVar(&SrcCluster.Pass, "sp", SrcCluster.Pass, "Source host Password.\n")
+    flag.StringVar(&DstCluster.Host, "dh", DstCluster.Host, "Destination host, eg:x.x.x.x:3000, x.x.x.x:tls-name:3000\n")
+    flag.StringVar(&DstCluster.User, "du", DstCluster.User, "Destination host User name.\n")
+    flag.StringVar(&DstCluster.Pass, "dp", DstCluster.Pass, "Destination host Password.\n")
+
     flag.StringVar(&Namespace, "n", Namespace, "Aerospike Namespace.\n")
     flag.StringVar(&Set, "s", Set, "Aerospike Set name. Default: All Sets in ns.\n")
     flag.StringVar(&BinString, "b", BinString, "Bin list: bin1,bin2,bin3...\n")
     flag.StringVar(&ModBeforeString, "B", ModBeforeString, "Time before which records modified. eg: Jan 2, 2006 at 3:04pm (MST)\n")
     flag.StringVar(&ModAfterString, "A", ModAfterString, "Time after which records modified. eg: Jan 2, 2006 at 3:04pm (MST)\n")
     flag.StringVar(&UnsyncRecInfoDir, "o", UnsyncRecInfoDir, "Output Dir path to log records to be synced.\n")
-    flag.IntVar(&PriorityInt, "P", PriorityInt, "The scan psamplePeiriority. 0 (auto), 1(low), 2 (medium), 3 (high). Default: 0.\n")
+    flag.IntVar(&PriorityInt, "P", PriorityInt, "The scan Priority. 0 (auto), 1(low), 2 (medium), 3 (high). Default: 0.\n")
     flag.IntVar(&SamplePer, "p", SamplePer, "Sample percentage. Default: 0.\n")
     flag.IntVar(&SampleSz, "sz", SampleSz, "Sample size. if sample percentage given, it won't work. Default: 1000.\n")
-    flag.IntVar(&FindSyncThread, "st", FindSyncThread, "Find sync thread. Default: 10.\n")
-    flag.BoolVar(&RemoveFiles, "r", RemoveFiles, "Remove existing sync log file.")
+    flag.IntVar(&Timeout, "T", Timeout, "Set read and write transaction timeout in milliseconds.. Default: 0.\n")
+    flag.IntVar(&MaxRetries, "mr", MaxRetries, "Maximum number of retries before aborting the current transaction. Default: 2.\n")
+    flag.IntVar(&FindSyncThread, "fst", FindSyncThread, "Find sync thread. Parallel request to server. Default: 10.\n")
+    flag.IntVar(&DoSyncThread, "dst", FindSyncThread, "Do sync thread. Parallel request to server. Default: 10.\n")
+    flag.BoolVar(&RemoveFiles, "r", RemoveFiles, "Remove existing sync log file.\n")
     flag.IntVar(&LogLevel, "ll", LogLevel, "Set log level, DEBUG(0), INFO(1), WARNING(2), ERR(3), Default: INFO\n")
-    /*
-    flag.BoolVar(&tlsEnable, "tls", tlsEnable, "Use TLS/SSL sockets\n")
-    flag.BoolVar(&tlsProtocols, "tp", "Allow TLS protocols\n
-        Values:SSLv3,TLSv1,TLSv1.1,TLSv1.2 separated by comma\n
-        Default: TLSv1.2\n")
-    flag.BoolVar(&tlsCipherSuite, "tlsCiphers", tlsCipherSuite, "Allow TLS cipher suites\n
-        Values:  cipher names defined by JVM separated by comma\n
-        Default: null (default cipher list provided by JVM\n")
-    flag.BoolVar(&tlsRevoke, "tr", tlsRevoke, "Revoke certificates identified by
-        their serial number\n
-        Values:  serial numbers separated by comma\n
-        Default: null (Do not revoke certificates\n")
-    flag.BoolVar(&tlsEncryptOnly, "te", tlsEncryptOnly, "enable TLS encryption
-        and disable TLS certificate validation\n")
-    */
+    flag.StringVar(&TLSConfigFile, "tcf", TLSConfigFile, "TLS config filepath.\n")
+
     flag.BoolVar(&ShowUsage, "u", ShowUsage, "Show usage information.\n")
 
     // TODO: Option specific to sync data
@@ -150,17 +148,17 @@ func main() {
 	readFlags()
 
     Logger.Info("Src: %s, Dst: %s, Namespace: %s, Set: %s, Binlist: %s, ModAfter: %s, ModBefore: %s, UnsyncRecInfoDir: %s, Priority: %s, SamplePer:%s",
-        SrcHost, DstHost, Namespace, Set, BinString, ModAfterString,
+        SrcCluster.Host, DstCluster.Host, Namespace, Set, BinString, ModAfterString,
         ModBeforeString, UnsyncRecInfoDir, strconv.Itoa(PriorityInt), strconv.Itoa(SamplePer))
 
     initUnsyncRecInfoDir()
 
     initPolicies()
 
-	SrcClient, err = getClient(srcClientPolicy, SrcHost)
+	SrcClient, err = getClient(&SrcCluster)
 	PanicOnError(err)
 
-	DstClient, err = getClient(dstClientPolicy, DstHost)
+	DstClient, err = getClient(&DstCluster)
 	PanicOnError(err)
 
     if !SyncOnly {
@@ -206,11 +204,11 @@ func readFlags() {
         os.Exit(0)
     }
 
-    if SrcHost == "" {
-        err = errors.New("SrcHost not given. Please provide host(x.x.x.x:yyyy).")
+    if SrcCluster.Host == "" {
+        err = errors.New("SrcCluster.Host not given. Please provide host(x.x.x.x:yyyy).")
 
-    } else if DstHost == "" {
-        err = errors.New("DstHost not given. Please provide host(x.x.x.x:yyyy).")
+    } else if DstCluster.Host == "" {
+        err = errors.New("DstCluster.Host not given. Please provide host(x.x.x.x:yyyy).")
 
     } else if Namespace == "" {
         err = errors.New("Namespace not given. Please provide Namespace.")
@@ -233,6 +231,12 @@ func readFlags() {
 
     if ModBefore < ModAfter {
         err = errors.New("Timerange incorrect. modafter > modbefore.")
+    }
+
+    // TODO: should we add src, dst host param also in config this file
+    if TLSConfigFile != "" {
+        InitTLSConfig(TLSConfigFile)
+
     }
 
     PanicOnError(err)
@@ -293,44 +297,67 @@ func initUnsyncRecInfoDir() {
 }
 
 
-
-
-
 // Init scan, clinet policies
 func initPolicies() {
     Logger.Info("Init all client, query policies.")
-    //readPolicy = as.NewPolicy()
+    ReadPolicy.Timeout = time.Duration(Timeout) * time.Millisecond
+    ReadPolicy.MaxRetries = MaxRetries
     // Get only checksum for record from server
-    /*
-    if UseCksm {
-        readPolicy.ChecksumOnly = true;
-    }
-    */
-    queryPolicy = as.NewQueryPolicy()
-    queryPolicy.Priority = Priority
-
-    srcClientPolicy = as.NewClientPolicy()
-    srcClientPolicy.User = SrcUser
-    srcClientPolicy.Password = SrcPass
-
-    dstClientPolicy = as.NewClientPolicy()
-    dstClientPolicy.User = DstUser
-    dstClientPolicy.Password = DstPass
-
+    //ReadPolicy.ChecksumOnly = true
+    QueryPolicy.Priority = Priority
 }
 
 
-func getClient(policy *as.ClientPolicy, host string) (*as.Client, error) {
-    Logger.Info("Connect to host: %s", host)
-    hostInfo := strings.Split(host, ":")
+func getHost(c *Cluster) *as.Host {
+
+    hostInfo := strings.Split(c.Host, ":")
     if len(hostInfo) < 2 {
-        PanicOnError(errors.New("Wrong host format. it should be (x.x.x.x:yyyy)."))
+        PanicOnError(errors.New("Wrong host format. it should be (x.x.x.x:tls_name:yyyy)."))
     }
 
     ip := hostInfo[0]
-    port, err := strconv.Atoi(hostInfo[1])
+    var port int
+    if len(hostInfo) == 3 {
+        c.TLSName = hostInfo[1]
+        port, err = strconv.Atoi(hostInfo[2])
+    } else {
+        port, err = strconv.Atoi(hostInfo[1])
+    }
+
     PanicOnError(err)
-    return  as.NewClientWithPolicyAndHost(policy, as.NewHost(ip, port))
+    host := as.NewHost(ip, port)
+
+    if c.TLSName != "" {
+        host.TLSName = c.TLSName
+    }
+    return host
+}
+
+func getClientPolicy(c *Cluster) *as.ClientPolicy {
+    policy := as.NewClientPolicy()
+    policy.User = c.User
+    policy.Password = c.Pass
+
+    if c.TLSName != "" || TLSConfig.TLS.EncryptOnly == true {
+        // Setup TLS Config
+        tlsConfig := &tls.Config{
+            Certificates:             TLSConfig.ClientPool(),
+            RootCAs:                  TLSConfig.ServerPool(),
+            InsecureSkipVerify:       TLSConfig.TLS.EncryptOnly,
+            PreferServerCipherSuites: true,
+        }
+        tlsConfig.BuildNameToCertificate()
+        policy.TlsConfig = tlsConfig
+    }
+    return policy
+}
+
+
+func getClient(c *Cluster) (*as.Client, error) {
+    Logger.Info("Connect to host: %s", c.Host)
+    host := getHost(c)
+    policy := getClientPolicy(c)
+    return  as.NewClientWithPolicyAndHost(policy, host)
 }
 
 
@@ -371,7 +398,6 @@ func printStat(ns string, set string, stat *TStats) {
 
     // Print "Unsync(Total, Updated, Inserted, Deleted)"
     if !SyncOnly {
-        stat.RecNotInSyncTotal = stat.RecNotInSyncUpdated + stat.RecNotInSyncInserted + stat.RecNotInSyncDeleted
         unsyncStr = "(" + strconv.Itoa(stat.RecNotInSyncTotal)  + "," +
                         strconv.Itoa(stat.RecNotInSyncUpdated)  + "," +
                         strconv.Itoa(stat.RecNotInSyncInserted) + "," +
@@ -380,12 +406,11 @@ func printStat(ns string, set string, stat *TStats) {
 
     // Print "sync(Total, Updated, Inserted, Deleted, GenErr)"
     if !FindOnly {
-        stat.RecSyncedTotal = stat.RecSyncedUpdated + stat.RecSyncedInserted + stat.RecSyncedDeleted
         syncStr = "(" + strconv.Itoa(stat.RecSyncedTotal)    + "," +
                         strconv.Itoa(stat.RecSyncedUpdated)  + "," +
                         strconv.Itoa(stat.RecSyncedInserted) + "," +
                         strconv.Itoa(stat.RecSyncedDeleted)  + "," +
-                        strconv.Itoa(stat.GenErr) + ")"
+                        strconv.Itoa(stat.DoSync.GenErr) + ")"
     }
     printLine(setStatsMeta, unsyncStr, syncStr)
 
@@ -396,19 +421,27 @@ func calcGlobalStat(gSt *TStats, setSts map[string]*TStats) {
     for _, statsObj := range setSts {
         gSt.NObj += statsObj.NObj
         gSt.NScanObj += statsObj.NScanObj
+        gSt.NSampleObj += statsObj.NSampleObj
 
         if !SyncOnly {
             gSt.RecNotInSyncUpdated += statsObj.RecNotInSyncUpdated
             gSt.RecNotInSyncInserted += statsObj.RecNotInSyncInserted
             gSt.RecNotInSyncDeleted += statsObj.RecNotInSyncDeleted
+            gSt.FindSync.ScanReqErr += statsObj.FindSync.ScanReqErr
+            gSt.FindSync.Err += statsObj.FindSync.Err
+
+            gSt.RecNotInSyncTotal += statsObj.RecNotInSyncTotal
         }
-        /*
+
         if !FindOnly {
             gSt.RecSyncedUpdated += statsObj.RecSyncedUpdated
             gSt.RecSyncedInserted += statsObj.RecSyncedInserted
             gSt.RecSyncedDeleted += statsObj.RecSyncedDeleted
-            gSt.GenErr += statsObj.GenErr
-        }*/
+            gSt.DoSync.GenErr += statsObj.DoSync.GenErr
+            gSt.DoSync.Err += statsObj.DoSync.Err
+
+            gSt.RecSyncedTotal += statsObj.RecSyncedTotal
+        }
     }
 }
 
@@ -430,13 +463,25 @@ func printAllStats() {
     syncStr   := "Sync(Total, Updated, Inserted, Deleted, GenErr)"
     printLine(metaList, unsyncStr, syncStr)
 
-    calcGlobalStat(&GStat, SetStats)
-
     for setname, statsObj := range SetStats {
+        statsObj.RecNotInSyncTotal = statsObj.RecNotInSyncUpdated + statsObj.RecNotInSyncInserted + statsObj.RecNotInSyncDeleted
+        statsObj.RecSyncedTotal = statsObj.RecSyncedUpdated + statsObj.RecSyncedInserted + statsObj.RecSyncedDeleted
         printStat(Namespace, setname, statsObj)
     }
 
     fmt.Println("\n****** Global stats ******\n")
+
+    calcGlobalStat(&GStat, SetStats)
+    // Log global and per set stats
+    g, err := json.Marshal(GStat)
+    if err == nil {
+        Logger.Info("Global Stat: " + string(g))
+    }
+    s, err := json.Marshal(SetStats)
+    if err == nil {
+        Logger.Info("Sets Stat: " + string(s))
+    }
+
     printStat(Namespace, "", &GStat)
     fmt.Println()
 }

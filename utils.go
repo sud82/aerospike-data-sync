@@ -18,7 +18,27 @@ import (
     "strconv"
     "strings"
     "time"
+    // TLS related
+	"crypto/tls"
+	"crypto/x509"
+	"io/ioutil"
+	"github.com/BurntSushi/toml"
+
 )
+
+type FindError struct {
+    // Error returned by server while scaning records
+    ScanReqErr int
+    // Other error, Timeout, no connection pool etc
+    Err int
+}
+
+type SyncError struct {
+    // Generation error at (check and write) operation
+    GenErr int
+    // Other error
+    Err int
+}
 
 type TStats struct {
     // Total checked objects
@@ -40,10 +60,8 @@ type TStats struct {
     RecSyncedInserted int
     RecSyncedDeleted int
 
-    // Generation error at (check and write) operation
-    GenErr int
-    // Error returned by server while scaning records
-    ReqErr int
+    FindSync FindError
+    DoSync SyncError
 }
 
 
@@ -251,7 +269,96 @@ func GetKeyFromString(ns string, recInfoLine string) (*as.Key, error) {
 
 
 // Calculate total recSynced
-func CalcTotalRecSynced(stat *TStats) {
+func CalcTotalRecSyncedOld(stat *TStats) {
     stat.RecSyncedTotal = stat.RecSyncedUpdated + stat.RecSyncedInserted + stat.RecSyncedDeleted
 }
 
+
+func CalcTotalRecSynced(setSts map[string]*TStats) int {
+    var totalSynced int = 0
+    for _, obj := range setSts {
+
+        if !FindOnly {
+            obj.RecSyncedTotal = obj.RecSyncedUpdated + obj.RecSyncedInserted +
+                obj.RecSyncedDeleted
+
+            totalSynced += obj.RecSyncedTotal
+        }
+    }
+    return totalSynced
+}
+
+
+//-------------------------------------------------------------------------------
+// TLS related
+//-------------------------------------------------------------------------------
+
+type Config struct {
+	TLS struct {
+		ServerPool []string `toml:"server_cert_pool"`
+		ClientPool map[string]struct {
+			CertFile string `toml:"cert_file"`
+			KeyFile  string `toml:"key_file"`
+		} `toml:"client_certs"`
+        EncryptOnly bool `toml:"encrypt_only"`
+	} `toml:"tls"`
+
+	serverPool *x509.CertPool
+	clientPool []tls.Certificate
+}
+
+var TLSConfig Config
+
+func (c *Config) ServerPool() *x509.CertPool {
+	return c.serverPool
+}
+
+func (c *Config) ClientPool() []tls.Certificate {
+	return c.clientPool
+}
+
+func InitTLSConfig(configFile string) {
+
+	// to print everything out regarding reading the config in app init
+	// log.SetLevel(log.DebugLevel)
+
+	if _, err := toml.DecodeFile(configFile, &TLSConfig); err != nil {
+        fmt.Println(err)
+		return
+	}
+
+
+    // Try to load system CA certs, otherwise just make an empty pool
+	serverPool, err := x509.SystemCertPool()
+	if err != nil {
+		Logger.Error("FAILED: Adding system certificates to the pool failed: " + err.Error())
+		serverPool = x509.NewCertPool()
+	}
+
+    // Try to load system CA certs and add them to the system cert pool
+    for _, caFile := range TLSConfig.TLS.ServerPool {
+        caCert, err := ioutil.ReadFile(caFile)
+        if err != nil {
+            Logger.Error("FAILED: Adding server certificate " + caFile + " to the pool failed: " + err.Error())
+            continue
+        }
+
+        Logger.Debug("Adding server certificate to the pool: " + caFile)
+        serverPool.AppendCertsFromPEM(caCert)
+    }
+
+    TLSConfig.serverPool = serverPool
+
+    // Try to load system CA certs and add them to the system cert pool
+    for _, cFiles := range TLSConfig.TLS.ClientPool {
+        cert, err := tls.LoadX509KeyPair(cFiles.CertFile, cFiles.KeyFile)
+        if err != nil {
+            Logger.Error("FAILED: Adding client certificate " + cFiles.CertFile + " to the pool failed: " + err.Error())
+            continue
+        }
+
+        Logger.Debug("Adding client certificate to the pool: " + cFiles.CertFile)
+        TLSConfig.clientPool = append(TLSConfig.clientPool, cert)
+    }
+
+}

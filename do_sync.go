@@ -24,7 +24,9 @@ import (
 // For threshold, Time window (track time after 1 sec)
 var (
     timeWEnd = time.Now()
-    recSyncedTotalOld int = 0
+    totalRecSynced int = 0
+    totalRecSyncedOld int = 0
+
 )
 
 //----------------------------------------------------------------------
@@ -45,9 +47,8 @@ func DoSync() {
 
 // Main func to sync all records from all unsyncRecord info files
 func doSyncForFile(filepath string) {
-    fmt.Println("func")
     // Number of threads to read from unsync_record_info file
-    rdThread := 100
+    rdThread := DoSyncThread
     // Channel to store record info, which failed to sync
     failedRecChan := make(chan string, 100)
     // Store rocods fetched from unsyncRecordInfo file
@@ -79,8 +80,10 @@ func doSyncForFile(filepath string) {
     go func() {
         for {
             timeWEnd = time.Now().Add(time.Second)
-            CalcTotalRecSynced(&GStat)
-            recSyncedTotalOld = GStat.RecSyncedTotal
+            //CalcTotalRecSynced(&GStat)
+            //totalRecSyncedOld = GStat.RecSyncedTotal
+            totalRecSynced = CalcTotalRecSynced(SetStats)
+            totalRecSyncedOld = totalRecSynced
             time.Sleep(time.Second)
         }
     }()
@@ -90,7 +93,6 @@ func doSyncForFile(filepath string) {
         for scanner.Scan() {
             rdChannel <- scanner.Text()
             Count++
-            //fmt.Println(Count)
         }
         close(rdChannel)
     }()
@@ -129,8 +131,8 @@ func validateAndSync(srcClient *as.Client, dstClient *as.Client, rdChannel <-cha
     for recInfoLine := range rdChannel {
 
         // Throttle if TPS exceed limit, sleep for remaining time (1sec - time)
-        CalcTotalRecSynced(&GStat)
-        for tps > 0 && ((GStat.RecSyncedTotal - recSyncedTotalOld) > tps) {
+        totalRecSynced = CalcTotalRecSynced(SetStats)
+        for tps > 0 && ((totalRecSynced - totalRecSyncedOld) > tps) {
             fmt.Println("Sleeping... ")
             time.Sleep(timeWEnd.Sub(time.Now()))
         }
@@ -150,43 +152,48 @@ func validateAndSync(srcClient *as.Client, dstClient *as.Client, rdChannel <-cha
 
         //TODO: Is there a way to directly convert gen to uint32
         // Update/Delete a record in destination if gen match with given gen
+        // 32 in Parse prevent data loss. return 64bit.
         gen64, err := strconv.ParseUint(recInfoList[REC_LINE_OFFSET_GEN], 10, 32)
         PanicOnError(err)
 
         gen32 := uint32(gen64)
 
         writePolicy := as.NewWritePolicy(0, 0)
+        writePolicy.Timeout = time.Duration(Timeout) * time.Millisecond
+        writePolicy.MaxRetries = MaxRetries
         writePolicy.GenerationPolicy = as.EXPECT_GEN_EQUAL
         writePolicy.Generation = gen32
 
         recKey, err := GetKeyFromString(Namespace, recInfoLine)
         PanicOnError(err)
 
-        readPolicy := as.NewPolicy()
-        srcRec, err := srcClient.Get(readPolicy, recKey, BinList...)
-        //PanicOnError(err)
-
         // In sync only case initialize stats
         if _, ok := SetStats[recKey.SetName()]; !ok {
             SetStats[recKey.SetName()] = &TStats{}
         }
 
-        // Delete record, skip if its not recorded in unsync_record_info file
-        if srcRec == nil {
-            syncPassed = syncDeletedRecord(dstClient, recKey, op, writePolicy)
-
-        } else if UseXdr && (op == INSERTED_OP || op == UPDATED_OP) {
-            // Touch the record xdr will send this, Assumes xdr is logging
-            // records.
-            // TODO: touch for specific bin and delta ship.
-            // srcClient.Touch(writePolicy, recKey)
-
+        srcRec, err := srcClient.Get(ReadPolicy, recKey, BinList...)
+        if err != nil {
+            //Logger.Debug("Get Record from source to sync. Error: " + err.Error())
+            SetStats[recKey.SetName()].DoSync.Err++
+            // Not found is not an error
         } else {
+            // Delete record, skip if its not recorded in unsync_record_info file
+            if srcRec == nil {
+                syncPassed = syncDeletedRecord(dstClient, recKey, op, writePolicy)
 
-            syncPassed = syncInsertedUpdatedRecord(dstClient, srcRec, op, writePolicy)
+            } else if UseXdr && (op == INSERTED_OP || op == UPDATED_OP) {
+                // Touch the record xdr will send this, Assumes xdr is logging
+                // records.
+                // TODO: touch for specific bin and delta ship.
+                // srcClient.Touch(writePolicy, recKey)
 
+            } else {
+
+                syncPassed = syncInsertedUpdatedRecord(dstClient, srcRec, op, writePolicy)
+
+            }
         }
-
         // Failed, again append it in logfile
         // TODO: Should there be some limit in this? What if it will keep
         // failing for so long....?
@@ -196,7 +203,7 @@ func validateAndSync(srcClient *as.Client, dstClient *as.Client, rdChannel <-cha
     }
 }
 
-
+/*
 func syncDeletedRecordOld(dstClient *as.Client, key *as.Key, op string, writePolicy *as.WritePolicy) bool {
 
     stat := SetStats[key.SetName()]
@@ -224,19 +231,21 @@ func syncDeletedRecordOld(dstClient *as.Client, key *as.Key, op string, writePol
     }
     // Pass gen related error
     if err != nil && err.Error() != "Generation error" {
-        PanicOnError(err)
+        //PanicOnError(err)
+        stat.DoSync.Err++
         return false
 
     } else {
-        GStat.RecSyncedDeleted++
+        //GStat.RecSyncedDeleted++
         stat.RecSyncedDeleted++
         if err != nil && err.Error() == "Generation error" {
-            GStat.GenErr++
-            stat.GenErr++
+            //GStat.DoSync.GenErr++
+            stat.DoSync.GenErr++
         }
     }
     return true
 }
+*/
 
 func syncDeletedRecord(dstClient *as.Client, key *as.Key, op string, writePolicy *as.WritePolicy) bool {
 
@@ -252,15 +261,16 @@ func syncDeletedRecord(dstClient *as.Client, key *as.Key, op string, writePolicy
 
     // Pass gen related error
     if err != nil && err.Error() != "Generation error" {
-        PanicOnError(err)
+        //PanicOnError(err)
+        stat.DoSync.Err++
         return false
 
     } else {
-        GStat.RecSyncedDeleted++
+        //GStat.RecSyncedDeleted++
         stat.RecSyncedDeleted++
         if err != nil && err.Error() == "Generation error" {
-            GStat.GenErr++
-            stat.GenErr++
+            //GStat.DoSync.GenErr++
+            stat.DoSync.GenErr++
         }
     }
     return true
@@ -276,23 +286,28 @@ func syncInsertedUpdatedRecord(dstClient *as.Client, srcRec *as.Record, op strin
     // Insert record
     if op == INSERTED_OP {
 
+        // Fail if record exist
+        // TODO: now it doesn't need gen=0, it can be removed
+        //writePolicy.RecordExistsAction = as.CREATE_ONLY
+
         writePolicy.RecordExistsAction = as.UPDATE
 
         err = dstClient.Put(writePolicy, srcRec.Key, srcRec.Bins)
 
         if err != nil && err.Error() != "Generation error" {
-            PanicOnError(err)
+            //PanicOnError(err)
+            stat.DoSync.Err++
             failed = true
 
         } else {
             if op == INSERTED_OP {
-                GStat.RecSyncedInserted++
+                //GStat.RecSyncedInserted++
                 stat.RecSyncedInserted++
             }
 
             if err != nil && err.Error() == "Generation error" {
-                GStat.GenErr++
-                stat.GenErr++
+                //GStat.DoSync.GenErr++
+                stat.DoSync.GenErr++
             }
         }
     }
@@ -320,16 +335,17 @@ func syncInsertedUpdatedRecord(dstClient *as.Client, srcRec *as.Record, op strin
         }
 
         if err != nil && err.Error() != "Generation error" {
-            PanicOnError(err)
+            //PanicOnError(err)
+            stat.DoSync.Err++
             failed = true
         } else {
             if op == UPDATED_OP {
-                GStat.RecSyncedUpdated++
+                //GStat.RecSyncedUpdated++
                 stat.RecSyncedUpdated++
             }
             if err != nil && err.Error() == "Generation error" {
-                GStat.GenErr++
-                stat.GenErr++
+                //GStat.DoSync.GenErr++
+                stat.DoSync.GenErr++
             }
         }
     }
