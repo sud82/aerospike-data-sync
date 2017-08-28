@@ -58,12 +58,15 @@ var (
     SampleSz int    = DEFAULT_SAMPLE_SIZE
 
     Timeout int = 0
-    MaxRetries int  = DEFAULT_MAX_RETRIES
+
+    // Number of threads run in parallel to compare src records with dst records
+    FindSyncThread = 10
+    DoSyncThread = 10
 
     RemoveFiles bool  = false
 
     // other cli related options
-    FindOnly bool     = false
+    FindOnly bool     = true
     // logger *log.Logger
     LogLevel int = 1
     // TLS
@@ -79,17 +82,13 @@ var (
     // Tps option to throttle sync writes
     Tps int = 0
 
-
-    // Number of threads run in parallel to compare src records with dst records
-    FindSyncThread = 10
-    DoSyncThread = 10
     // Internal options (some external options are changed in these internal
     // options and then used)
     Priority as.Priority = as.DEFAULT
     BinList []string  = nil
     ModBefore int64        = time.Now().In(time.UTC).UnixNano()
     ModAfter int64         = 0
-
+    MaxRetries int  = DEFAULT_MAX_RETRIES
     UnsyncRecInfoFile string = ""
     UnsyncRecInfoFileCount int = 1
 )
@@ -125,9 +124,9 @@ func main() {
     flag.StringVar(&UnsyncRecInfoDir, "o", UnsyncRecInfoDir, "Output Dir path to log records to be synced.\n")
     flag.IntVar(&PriorityInt, "P", PriorityInt, "The scan Priority. 0 (auto), 1(low), 2 (medium), 3 (high). Default: 0.\n")
     flag.IntVar(&SamplePer, "p", SamplePer, "Sample percentage. Default: 0.\n")
-    flag.IntVar(&SampleSz, "sz", SampleSz, "Sample size. if sample percentage given, it won't work. Default: 1000.\n")
+    flag.IntVar(&SampleSz, "ss", SampleSz, "Sample size. if sample percentage given, it won't work. Default: 1000.\n")
     flag.IntVar(&Timeout, "T", Timeout, "Set read and write transaction timeout in milliseconds.. Default: 0.\n")
-    flag.IntVar(&MaxRetries, "mr", MaxRetries, "Maximum number of retries before aborting the current transaction. Default: 2.\n")
+    //flag.IntVar(&MaxRetries, "mr", MaxRetries, "Maximum number of retries before aborting the current transaction. Default: 2.\n")
     flag.IntVar(&FindSyncThread, "fst", FindSyncThread, "Find sync thread. Parallel request to server. Default: 10.\n")
     flag.IntVar(&DoSyncThread, "dst", FindSyncThread, "Do sync thread. Parallel request to server. Default: 10.\n")
     flag.BoolVar(&RemoveFiles, "r", RemoveFiles, "Remove existing sync log file.\n")
@@ -139,17 +138,18 @@ func main() {
     // TODO: Option specific to sync data
     //flag.IntVar(&Tps, "t", Tps, "Throttling limit. will throttle server writes if Tps exceed given limit.\n")
     //flag.BoolVar(&SyncDelete, "sd", SyncDelete, "Delete synced data also. Warning (Don't use this in active-active topology.)\n")
-    flag.BoolVar(&FindOnly, "fo", FindOnly, "Tool will just find unsynced data. By default: (find and sync)\n")
-    flag.BoolVar(&SyncOnly, "so", SyncOnly, "Tool will just sync records using record log file.\n")
+    //flag.BoolVar(&FindOnly, "fo", FindOnly, "Tool will just find unsynced data. By default: (find and sync)\n")
+    //flag.BoolVar(&SyncOnly, "so", SyncOnly, "Tool will just sync records using record log file.\n")
     //flag.BoolVar(&UseXdr, "xdr", UseXdr, "Use XDR to ship unsynced records.\n")
     //flag.BoolVar(&UseCksm, "c", UseCksm, "Compare record checksum.\n")
     //flag.BoolVar(&verbose, "v", verbose, "Verbose mode\n")
 
 	readFlags()
 
-    Logger.Info("Src: %s, Dst: %s, Namespace: %s, Set: %s, Binlist: %s, ModAfter: %s, ModBefore: %s, UnsyncRecInfoDir: %s, Priority: %s, SamplePer:%s",
+    Logger.Info("Src: %s, Dst: %s, Namespace: %s, Set: %s, Binlist: %s,
+    ModAfter: %s, ModBefore: %s, UnsyncRecInfoDir: %s, Priority: %s, SamplePer:%s, SampleSz:%s",
         SrcCluster.Host, DstCluster.Host, Namespace, Set, BinString, ModAfterString,
-        ModBeforeString, UnsyncRecInfoDir, strconv.Itoa(PriorityInt), strconv.Itoa(SamplePer))
+        ModBeforeString, UnsyncRecInfoDir, strconv.Itoa(PriorityInt), strconv.Itoa(SamplePer), strconv.Itoa(SampleSz))
 
     initUnsyncRecInfoDir()
 
@@ -165,11 +165,11 @@ func main() {
         FindRecordsNotInSync()
     }
     // TODO: Currently sync disable
-
+    /*
     if !FindOnly {
         DoSync()
     }
-
+    */
     printAllStats()
 }
 

@@ -80,8 +80,6 @@ func doSyncForFile(filepath string) {
     go func() {
         for {
             timeWEnd = time.Now().Add(time.Second)
-            //CalcTotalRecSynced(&GStat)
-            //totalRecSyncedOld = GStat.RecSyncedTotal
             totalRecSynced = CalcTotalRecSynced(SetStats)
             totalRecSyncedOld = totalRecSynced
             time.Sleep(time.Second)
@@ -152,7 +150,7 @@ func validateAndSync(srcClient *as.Client, dstClient *as.Client, rdChannel <-cha
 
         //TODO: Is there a way to directly convert gen to uint32
         // Update/Delete a record in destination if gen match with given gen
-        // 32 in Parse prevent data loss. return 64bit.
+        // 32 in Parse prevent data loss. Parse return 64bit.
         gen64, err := strconv.ParseUint(recInfoList[REC_LINE_OFFSET_GEN], 10, 32)
         PanicOnError(err)
 
@@ -203,49 +201,6 @@ func validateAndSync(srcClient *as.Client, dstClient *as.Client, rdChannel <-cha
     }
 }
 
-/*
-func syncDeletedRecordOld(dstClient *as.Client, key *as.Key, op string, writePolicy *as.WritePolicy) bool {
-
-    stat := SetStats[key.SetName()]
-
-    if op != DELETED_OP {
-        return true
-    }
-
-    // If Binlist == 0, then full record must be deleted
-    if len(BinList) == 0 {
-        _, err = dstClient.Delete(writePolicy, key)
-
-    } else {
-
-        writePolicy.RecordExistsAction = as.UPDATE
-
-        binMap := []*as.Bin{}
-
-        for _, binName:= range BinList {
-            binMap = append(binMap, as.NewBin(binName, nil))
-        }
-
-        // TODO: check all conditions when reading writing
-        err = dstClient.PutBins(writePolicy, key, binMap...)
-    }
-    // Pass gen related error
-    if err != nil && err.Error() != "Generation error" {
-        //PanicOnError(err)
-        stat.DoSync.Err++
-        return false
-
-    } else {
-        //GStat.RecSyncedDeleted++
-        stat.RecSyncedDeleted++
-        if err != nil && err.Error() == "Generation error" {
-            //GStat.DoSync.GenErr++
-            stat.DoSync.GenErr++
-        }
-    }
-    return true
-}
-*/
 
 func syncDeletedRecord(dstClient *as.Client, key *as.Key, op string, writePolicy *as.WritePolicy) bool {
 
@@ -277,7 +232,6 @@ func syncDeletedRecord(dstClient *as.Client, key *as.Key, op string, writePolicy
 }
 
 
-
 func syncInsertedUpdatedRecord(dstClient *as.Client, srcRec *as.Record, op string, writePolicy *as.WritePolicy) bool {
 
     stat := SetStats[srcRec.Key.SetName()]
@@ -287,8 +241,6 @@ func syncInsertedUpdatedRecord(dstClient *as.Client, srcRec *as.Record, op strin
     if op == INSERTED_OP {
 
         // Fail if record exist
-        // TODO: now it doesn't need gen=0, it can be removed
-        //writePolicy.RecordExistsAction = as.CREATE_ONLY
 
         writePolicy.RecordExistsAction = as.UPDATE
 

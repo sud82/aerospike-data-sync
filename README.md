@@ -25,10 +25,11 @@ options:
 -B                  Time before which records modified. eg: Jan 2, 2006 at 3:04pm (MST)
 -o                  Output File to log records to be synced.
 -P                  The scan priority. 0 (auto), 1(low), 2 (medium), 3 (high). Default: 0.
--p                  Sample percentage. (Default: 10)
+-p                  Sample percentage. (Default: 0)
 -ss                 Sample size. if sample percentage given, it won't work. Default: 1000
 -r                  Remove existing record sync log files
 -ll                 Set log level, DEBUG(0), INFO(1), WARNING(2), ERR(3), Default: INFO
+-tcf                TLS config filepath.
 -u                  Print usage.
 
 
@@ -38,7 +39,7 @@ options:
 Some sample arguments are:
 
 ```
-./syncCluster -sh 127.0.0.1:3000 -dh 127.0.0.0:3009 -n test -s testset -P 2 p 10
+./aerospike-data-sync -sh 127.0.0.1:3000 -dh 127.0.0.0:3009 -n test -s testset -P 2 p 10
 -A "Mar 31, 2017 at 11:01pm (PDT)" -o rec_sync.log -r
 
 \# Source cluster is 127.0.0.1:3000, Destination cluster is 127.0.0.0:3009 and 
@@ -51,3 +52,4 @@ priority(P 2)
 
 Note:  Only supported on Aerospike 3.X and above
 
+Need go -version >= 1.7

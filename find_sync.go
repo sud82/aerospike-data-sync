@@ -28,7 +28,6 @@ func FindRecordsNotInSync() {
     Logger.Info("Find records not in sync")
     wg := new(sync.WaitGroup)
 
-
     // Channel to store unsync record's info, max 100000*50 = 5MB record info at a time
     recordInfoChan := make(chan string, 100000)
 
@@ -119,8 +118,8 @@ func FindRecordsNotInSync() {
             continue
         }
 
-        // 100000 ~= 5MB file
-        if fileLineCount == 100000 {
+        // 250MB file
+        if fileLineCount == UNSYNC_REC_INFO_FILE_LINES_COUNT {
             file.Close()
             // Init new file
             InitUnsyncRecInfoFile()

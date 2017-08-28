@@ -105,6 +105,9 @@ const (
     REC_LINE_OFFSET_DG   = 1
     REC_LINE_OFFSET_SET  = 2
     REC_LINE_OFFSET_GEN  = 3
+
+    // ~50B per lines so ~250MB file
+    UNSYNC_REC_INFO_FILE_LINES_COUNT = 5000000
 )
 
 
@@ -122,7 +125,6 @@ var (
 
     // Track stats for all sets within namespace
     SetStats = map[string]*TStats{}
-
 )
 
 //----------------------------------------------------------------------------
@@ -269,11 +271,6 @@ func GetKeyFromString(ns string, recInfoLine string) (*as.Key, error) {
 
 
 // Calculate total recSynced
-func CalcTotalRecSyncedOld(stat *TStats) {
-    stat.RecSyncedTotal = stat.RecSyncedUpdated + stat.RecSyncedInserted + stat.RecSyncedDeleted
-}
-
-
 func CalcTotalRecSynced(setSts map[string]*TStats) int {
     var totalSynced int = 0
     for _, obj := range setSts {

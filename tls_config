@@ -4,9 +4,6 @@ encrypt_only = false
 # name of cert files to add to the pool for TLS connections
 # All entries should be a string
 server_cert_pool = [
-	#"/Users/khosrow/projects/go/src/github.com/citrusleaf/amc/cert.pem",
-    #"/home/sud/aero-git/test/x509_certificates/tmp_cert/ca/subject/ClusterName-b/req.pem",
-    #"/home/sud/goproj/src/gospace/src/github.com/sud82/aerospike-data-sync/cert.pem",
     "/home/sud/aero-git/test/x509_certificates/tmp_cert/ca/subject/Platinum/cacert.pem",
     #"/home/sud/aero-git/test/x509_certificates/tmp_cert/ca/subject/Client/client_chain.pem"
     #"/home/sud/aero-git/test/x509_certificates/tmp_cert/ca/subject/ClusterName-b/cert.pem"
